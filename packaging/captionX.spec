@@ -24,6 +24,8 @@ datas = [
     (str(FRONTEND), "frontend_dist"),
     (str(BACKEND / "app" / "templates"), "app/templates"),
 ]
+if ICON.exists():
+    datas.append((str(ICON), "assets"))
 hidden = (
     collect_submodules("app")
     + collect_submodules("uvicorn")

@@ -89,6 +89,91 @@ def _app_browser() -> str | None:
     return None
 
 
+def _brand_window(timeout: float = 25.0) -> None:
+    """Windows: give the captionX window our own taskbar icon and identity instead of Edge/Chrome's."""
+    import ctypes
+    from ctypes import wintypes
+
+    from app import paths
+
+    ico = paths.bundle_dir() / "assets" / "icon.ico"
+    if not ico.exists():
+        return
+    user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+    shell32 = ctypes.windll.shell32  # type: ignore[attr-defined]
+    ole32 = ctypes.windll.ole32  # type: ignore[attr-defined]
+
+    def load(size: int):
+        return user32.LoadImageW(None, str(ico), 1, size, size, 0x10)  # IMAGE_ICON, LR_LOADFROMFILE
+
+    big, small = load(256), load(16)
+
+    class GUID(ctypes.Structure):
+        _fields_ = [("a", ctypes.c_ulong), ("b", ctypes.c_ushort), ("c", ctypes.c_ushort), ("d", ctypes.c_ubyte * 8)]
+
+    def guid(s: str) -> GUID:
+        import uuid
+        u = uuid.UUID(s)
+        g = GUID()
+        g.a, g.b, g.c = u.time_low, u.time_mid, u.time_hi_version
+        for i, byte in enumerate(u.bytes[8:]):
+            g.d[i] = byte
+        return g
+
+    class KEY(ctypes.Structure):
+        _fields_ = [("fmtid", GUID), ("pid", wintypes.DWORD)]
+
+    class PROPVARIANT(ctypes.Structure):
+        _fields_ = [("vt", ctypes.c_ushort), ("r1", ctypes.c_ushort), ("r2", ctypes.c_ushort),
+                    ("r3", ctypes.c_ushort), ("p", ctypes.c_void_p), ("pad", ctypes.c_void_p)]
+
+    def set_identity(hwnd) -> None:
+        store = ctypes.c_void_p()
+        iid = guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99")  # IID_IPropertyStore
+        if shell32.SHGetPropertyStoreForWindow(hwnd, ctypes.byref(iid), ctypes.byref(store)) != 0 or not store:
+            return
+        vtbl = ctypes.cast(ctypes.cast(store, ctypes.POINTER(ctypes.c_void_p))[0], ctypes.POINTER(ctypes.c_void_p))
+        set_value = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(KEY), ctypes.POINTER(PROPVARIANT))(vtbl[6])
+        commit = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)(vtbl[7])
+        release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtbl[2])
+        fmt = "9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"
+        exe = sys.executable
+        for pid, value in ((5, "Harmain.captionX"), (2, f'"{exe}"'), (4, "captionX"), (3, f"{ico},0")):
+            buf = ctypes.create_unicode_buffer(value)
+            pv = PROPVARIANT(vt=31, p=ctypes.cast(buf, ctypes.c_void_p).value)  # VT_LPWSTR
+            set_value(store, ctypes.byref(KEY(guid(fmt), pid)), ctypes.byref(pv))
+        commit(store)
+        release(store)
+
+    done: set[int] = set()
+    enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def visit(hwnd, _lparam):
+        if hwnd in done or not user32.IsWindowVisible(hwnd):
+            return True
+        cls = ctypes.create_unicode_buffer(64)
+        user32.GetClassNameW(hwnd, cls, 64)
+        title = ctypes.create_unicode_buffer(256)
+        user32.GetWindowTextW(hwnd, title, 256)
+        if cls.value == "Chrome_WidgetWin_1" and title.value.startswith("captionX"):
+            done.add(hwnd)
+            try:
+                set_identity(hwnd)
+            except Exception:
+                pass
+            user32.SendMessageW(hwnd, 0x80, 1, big)    # WM_SETICON, ICON_BIG
+            user32.SendMessageW(hwnd, 0x80, 0, small)  # ICON_SMALL
+        return True
+
+    callback = enum_proc(visit)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        user32.EnumWindows(callback, 0)
+        if done:
+            return
+        time.sleep(0.4)
+
+
 def _open_window(url: str, data_dir: Path) -> None:
     """Own app window (no tabs or address bar) with a separate browser profile; falls back to the default browser."""
     exe = _app_browser() if os.name == "nt" else None
@@ -96,10 +181,18 @@ def _open_window(url: str, data_dir: Path) -> None:
         try:
             subprocess.Popen([exe, f"--app={url}", f"--user-data-dir={data_dir / 'window'}", "--no-first-run",
                               "--no-default-browser-check", "--window-size=1380,900", "--disable-features=Translate"])
+            threading.Thread(target=lambda: _safe(_brand_window), name="captionx-icon", daemon=True).start()
             return
         except OSError:
             pass
     webbrowser.open(url)
+
+
+def _safe(fn) -> None:
+    try:
+        fn()
+    except Exception:
+        pass
 
 
 def _tray_image():
