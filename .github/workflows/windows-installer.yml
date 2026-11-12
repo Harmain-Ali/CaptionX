@@ -1,0 +1,77 @@
+name: Windows installer
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: frontend/package.json
+
+      - name: Build the web interface
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Python dependencies
+        run: pip install -r backend/requirements.txt -r backend/requirements-build.txt
+
+      - name: Download ffmpeg
+        run: pwsh packaging/get-ffmpeg.ps1
+
+      - name: Package the app
+        run: pyinstaller packaging/captionX.spec --noconfirm --distpath dist-win --workpath build-win
+
+      - name: Smoke test the packaged app
+        shell: pwsh
+        run: |
+          $env:CAPTIONX_HEADLESS = "1"
+          $p = Start-Process -FilePath "dist-win\captionX\captionX.exe" -PassThru
+          $ok = $false
+          foreach ($i in 1..40) {
+            Start-Sleep -Seconds 1
+            try {
+              $r = Invoke-RestMethod -Uri "http://127.0.0.1:8765/api/health" -TimeoutSec 2
+              if ($r.ok -and $r.ffmpeg -and $r.ffprobe) { $ok = $true; break }
+            } catch {}
+          }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          if (-not $ok) { throw "The packaged app did not start, or ffmpeg is missing from it." }
+          Write-Host "Packaged app started and found its ffmpeg."
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $ver = python -c "import re;print(re.search(r'`"(.+?)`"',open('backend/app/__init__.py').read()).group(1))"
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$ver" packaging\captionX.iss
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: captionX-Setup
+          path: dist-installer/*.exe
+
+      - name: Attach to the GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist-installer/*.exe

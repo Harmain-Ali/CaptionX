@@ -1,0 +1,148 @@
+"""captionX desktop launcher (the entry point of the packaged Windows app).
+
+Starts the server on 127.0.0.1, opens captionX in the browser, and sits in the system tray (Open / Quit).
+Set CAPTIONX_HEADLESS=1 to run the server only (used by the build's smoke test).
+"""
+from __future__ import annotations
+
+import json
+import os
+import socket
+import sys
+import threading
+import time
+import urllib.request
+import webbrowser
+
+PREFERRED_PORT = 8765
+
+
+def _prepare() -> None:
+    """Environment must be ready BEFORE the app modules are imported."""
+    from app import paths
+
+    data = paths.default_data_dir()
+    data.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("CAPTIONS_DATA_DIR", str(data))
+    # A windowed exe has no console: send output to a log file so errors are never lost (and uvicorn never trips on None).
+    log = open(data / "captionx.log", "a", buffering=1, encoding="utf-8", errors="replace")
+    if sys.stdout is None:
+        sys.stdout = log
+    if sys.stderr is None:
+        sys.stderr = log
+    # Use the ffmpeg that ships with the app before anything on the system PATH.
+    names = ("ffmpeg.exe", "ffprobe.exe") if os.name == "nt" else ("ffmpeg", "ffprobe")
+    for d in paths.ffmpeg_dirs():
+        if all((d / n).exists() for n in names):
+            os.environ["PATH"] = str(d) + os.pathsep + os.environ.get("PATH", "")
+            break
+
+
+def _is_ours(port: int) -> bool:
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1.5) as r:
+            d = json.loads(r.read().decode("utf-8"))
+        return bool(d.get("ok")) and "version" in d
+    except Exception:
+        return False
+
+
+def _port_free(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+
+
+def _pick_port() -> int:
+    if _port_free(PREFERRED_PORT):
+        return PREFERRED_PORT
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _message(title: str, text: str, blocking: bool = True) -> None:
+    """Native message box on Windows; stderr elsewhere."""
+    if os.name == "nt":
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(None, text, title, 0x40 if blocking else 0x10)  # type: ignore[attr-defined]
+    else:
+        print(f"{title}: {text}", file=sys.stderr)
+
+
+def _tray_image():
+    from PIL import Image, ImageDraw
+    size = 128
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((0, 0, size - 1, size - 1), radius=38, fill=(255, 76, 0, 255))
+    w = 14
+    d.line((40, 40, 88, 88), fill=(10, 10, 10, 255), width=w)
+    d.line((88, 40, 40, 88), fill=(10, 10, 10, 255), width=w)
+    for x, y in ((40, 40), (88, 88), (88, 40), (40, 88)):
+        d.ellipse((x - w // 2, y - w // 2, x + w // 2, y + w // 2), fill=(10, 10, 10, 255))
+    return img
+
+
+def main() -> int:
+    _prepare()
+    from app import paths
+
+    if _is_ours(PREFERRED_PORT) and not os.environ.get("CAPTIONX_HEADLESS"):
+        webbrowser.open(f"http://127.0.0.1:{PREFERRED_PORT}")  # already running: just bring it up
+        return 0
+
+    import uvicorn
+    from app.main import app
+
+    port = _pick_port()
+    url = f"http://127.0.0.1:{port}"
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_config=None,
+                                           loop="asyncio", http="h11", ws="none", lifespan="on"))
+    thread = threading.Thread(target=server.run, name="captionx-server", daemon=True)
+    thread.start()
+    t0 = time.time()
+    while not server.started and thread.is_alive() and time.time() - t0 < 40:
+        time.sleep(0.1)
+    if not server.started:
+        _message("captionX could not start", f"The local server did not start.\nDetails are in:\n{paths.default_data_dir() / 'captionx.log'}", False)
+        return 1
+
+    if os.environ.get("CAPTIONX_HEADLESS"):
+        print(f"captionX headless on {url}", flush=True)
+        try:
+            while thread.is_alive():
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            server.should_exit = True
+        return 0
+
+    webbrowser.open(url)
+
+    def quit_app(icon=None, item=None):
+        server.should_exit = True
+        if icon is not None:
+            icon.stop()
+
+    try:
+        import pystray
+        menu = pystray.Menu(
+            pystray.MenuItem("Open captionX", lambda icon, item: webbrowser.open(url), default=True),
+            pystray.MenuItem("Open data folder", lambda icon, item: os.startfile(str(paths.default_data_dir())) if os.name == "nt" else None),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Quit captionX", quit_app),
+        )
+        pystray.Icon("captionX", _tray_image(), "captionX", menu).run()  # blocks until Quit
+    except Exception as e:  # no tray available: a dialog keeps the app alive; OK quits it
+        print(f"tray unavailable ({e!r})", file=sys.stderr)
+        _message("captionX is running", f"captionX is open in your browser at\n{url}\n\nClick OK to quit captionX.")
+    server.should_exit = True
+    thread.join(timeout=5)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,4 @@
+# Only needed to build the Windows installer
+pyinstaller>=6.10
+pystray>=0.19
+pillow>=10
