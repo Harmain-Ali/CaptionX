@@ -498,3 +498,38 @@ def test_launcher_picks_a_free_port_and_recognises_itself():
         p = launcher._pick_port()
         assert 1024 < p < 65536 and p != launcher.PREFERRED_PORT
     assert launcher._is_ours(1) is False
+
+
+# ------------------------------------------------------------------------------ quit when the window closes
+def test_presence_quits_only_after_the_window_is_really_gone():
+    from app.presence import GRACE_SECONDS, STALE_SECONDS, Presence
+    t = [1000.0]
+    p = Presence(clock=lambda: t[0])
+    assert p.should_quit() is False                       # never opened yet: don't quit
+    p.ping("a"); p.ping("b")
+    p.bye("a"); t[0] += GRACE_SECONDS + 1
+    assert p.should_quit() is False                       # another tab is still open
+    p.bye("b")
+    t[0] += GRACE_SECONDS - 1
+    assert p.should_quit() is False                       # inside the grace period (a reload)
+    p.ping("c")                                           # the reloaded page comes back
+    p.bye("c"); t[0] += GRACE_SECONDS + 0.5
+    assert p.should_quit(busy=True) is False              # a job is running: stay alive
+    t[0] += 1
+    assert p.should_quit(busy=True) is False              # the countdown restarts after the job ends
+    t[0] += GRACE_SECONDS + 1
+    assert p.should_quit() is True
+    p2 = Presence(clock=lambda: t[0]); p2.ping("x")       # page vanished without saying bye (sleep, crash)
+    t[0] += STALE_SECONDS + 1
+    assert p2.should_quit() is False
+    t[0] += GRACE_SECONDS + 1
+    assert p2.should_quit() is True
+
+
+def test_presence_endpoints(client):
+    from app.presence import presence
+    assert client.post("/api/presence/ping", json={"id": "t1"}).json()["ok"] is True
+    assert presence.count() >= 1
+    # sendBeacon sends a Blob body with a JSON type
+    assert client.post("/api/presence/bye", content=b'{"id": "t1"}', headers={"content-type": "application/json"}).status_code == 200
+    assert client.post("/api/presence/bye", content=b"not json").status_code == 200   # never errors

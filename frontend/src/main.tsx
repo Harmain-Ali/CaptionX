@@ -5,6 +5,9 @@ import "@fontsource-variable/geist-mono";
 import "@fontsource/noto-nastaliq-urdu/arabic-500.css";
 import "./styles.css";
 import App from "./App";
+import { startPresence } from "./lib/presence";
+
+startPresence();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

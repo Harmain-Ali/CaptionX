@@ -1,6 +1,7 @@
 """captionX desktop launcher (the entry point of the packaged Windows app).
 
-Starts the server on 127.0.0.1, opens captionX in the browser, and sits in the system tray (Open / Quit).
+Starts the server on 127.0.0.1, opens captionX in its own app window, and quits by itself when that window is closed
+(a tray icon gives Open / Quit while it runs).
 Set CAPTIONX_HEADLESS=1 to run the server only (used by the build's smoke test).
 """
 from __future__ import annotations
@@ -8,11 +9,13 @@ from __future__ import annotations
 import json
 import os
 import socket
+import subprocess
 import sys
 import threading
 import time
 import urllib.request
 import webbrowser
+from pathlib import Path
 
 PREFERRED_PORT = 8765
 
@@ -73,6 +76,32 @@ def _message(title: str, text: str, blocking: bool = True) -> None:
         print(f"{title}: {text}", file=sys.stderr)
 
 
+def _app_browser() -> str | None:
+    """Edge (always on Windows 10/11) or Chrome, to show captionX as its own window with its own taskbar button."""
+    pf, pf86, local = (os.environ.get(k, "") for k in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"))
+    for base, rel in (
+        (pf86, r"Microsoft\Edge\Application\msedge.exe"), (pf, r"Microsoft\Edge\Application\msedge.exe"),
+        (pf, r"Google\Chrome\Application\chrome.exe"), (pf86, r"Google\Chrome\Application\chrome.exe"),
+        (local, r"Google\Chrome\Application\chrome.exe"),
+    ):
+        if base and (Path(base) / rel).exists():
+            return str(Path(base) / rel)
+    return None
+
+
+def _open_window(url: str, data_dir: Path) -> None:
+    """Own app window (no tabs or address bar) with a separate browser profile; falls back to the default browser."""
+    exe = _app_browser() if os.name == "nt" else None
+    if exe:
+        try:
+            subprocess.Popen([exe, f"--app={url}", f"--user-data-dir={data_dir / 'window'}", "--no-first-run",
+                              "--no-default-browser-check", "--window-size=1380,900", "--disable-features=Translate"])
+            return
+        except OSError:
+            pass
+    webbrowser.open(url)
+
+
 def _tray_image():
     from PIL import Image, ImageDraw
     size = 128
@@ -92,7 +121,7 @@ def main() -> int:
     from app import paths
 
     if _is_ours(PREFERRED_PORT) and not os.environ.get("CAPTIONX_HEADLESS"):
-        webbrowser.open(f"http://127.0.0.1:{PREFERRED_PORT}")  # already running: just bring it up
+        _open_window(f"http://127.0.0.1:{PREFERRED_PORT}", paths.default_data_dir())  # already running: bring it up
         return 0
 
     import uvicorn
@@ -111,8 +140,34 @@ def main() -> int:
         _message("captionX could not start", f"The local server did not start.\nDetails are in:\n{paths.default_data_dir() / 'captionx.log'}", False)
         return 1
 
+    tray: dict = {"icon": None}
+
+    def quit_app(icon=None, item=None):
+        server.should_exit = True
+        ic = icon or tray["icon"]
+        if ic is not None:
+            try:
+                ic.stop()
+            except Exception:
+                pass
+
+    def watchdog():
+        """Quit by itself once the captionX window is closed (never during a running job)."""
+        from app.main import jobs
+        from app.presence import presence
+        while thread.is_alive():
+            time.sleep(1)
+            busy = any(j.get("status") in ("queued", "running") for j in jobs.list())
+            if presence.should_quit(busy):
+                print("window closed, quitting", flush=True)
+                quit_app()
+                time.sleep(1.5)
+                os._exit(0)  # also ends the fallback dialog if the tray never started
+
     if os.environ.get("CAPTIONX_HEADLESS"):
         print(f"captionX headless on {url}", flush=True)
+        if os.environ.get("CAPTIONX_AUTOQUIT"):
+            threading.Thread(target=watchdog, name="captionx-watchdog", daemon=True).start()
         try:
             while thread.is_alive():
                 time.sleep(0.5)
@@ -120,22 +175,19 @@ def main() -> int:
             server.should_exit = True
         return 0
 
-    webbrowser.open(url)
-
-    def quit_app(icon=None, item=None):
-        server.should_exit = True
-        if icon is not None:
-            icon.stop()
+    _open_window(url, paths.default_data_dir())
+    threading.Thread(target=watchdog, name="captionx-watchdog", daemon=True).start()
 
     try:
         import pystray
         menu = pystray.Menu(
-            pystray.MenuItem("Open captionX", lambda icon, item: webbrowser.open(url), default=True),
+            pystray.MenuItem("Open captionX", lambda icon, item: _open_window(url, paths.default_data_dir()), default=True),
             pystray.MenuItem("Open data folder", lambda icon, item: os.startfile(str(paths.default_data_dir())) if os.name == "nt" else None),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit captionX", quit_app),
         )
-        pystray.Icon("captionX", _tray_image(), "captionX", menu).run()  # blocks until Quit
+        tray["icon"] = pystray.Icon("captionX", _tray_image(), "captionX", menu)
+        tray["icon"].run()  # blocks until Quit
     except Exception as e:  # no tray available: a dialog keeps the app alive; OK quits it
         print(f"tray unavailable ({e!r})", file=sys.stderr)
         _message("captionX is running", f"captionX is open in your browser at\n{url}\n\nClick OK to quit captionX.")

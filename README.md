@@ -16,7 +16,7 @@ Whisper owns the **timing**, the LLM only **spells**. The LLM never sees or chan
 
 ## Install on Windows (no Python, Node or ffmpeg needed)
 
-Download **captionX-Setup-x.y.z.exe**, run it, and open captionX from the Start menu or desktop shortcut. It starts in your browser and sits in the system tray (right-click the tray icon, **Quit captionX**, to stop it). Windows may show a "Windows protected your PC" notice because the installer is not code-signed: click **More info**, then **Run anyway**. Your settings, key and history are kept in `%LOCALAPPDATA%\captionX` and survive updates and uninstalls.
+Download **captionX-Setup-x.y.z.exe**, run it, and open captionX from the Start menu or desktop shortcut. It opens in its own window (Edge or Chrome in app mode, with its own taskbar button) and **quits by itself when you close that window**, unless a job is still running. A tray icon (under the ^ arrow) offers Open and Quit while it runs. Windows shows "Windows protected your PC" because the installer is not code-signed: click **More info**, then **Run anyway**. Your settings, key and history are kept in `%LOCALAPPDATA%\captionX` and survive updates and uninstalls.
 
 ### Build the installer yourself
 Pick one:

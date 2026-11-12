@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
 from . import __version__, audio, drt, fcpxml, fusion, paths, srt
+from .presence import presence
 from .config import DATA_DIR, JOBS_DIR, RUN_OVERRIDABLE, Settings, merged_for_run, store
 from .errors import AppError
 from .groq_client import call_with_retry, make_client
@@ -85,6 +86,29 @@ async def _unhandled(_: Request, e: Exception):
     log.exception("unhandled error")
     return JSONResponse({"error": {"code": "INTERNAL", "message": f"Unexpected error: {e}",
                                    "hint": "See the backend terminal for details."}}, status_code=500)
+
+
+# --------------------------------------------------------------------------- presence (lets the packaged app quit when its window closes)
+async def _client_id(request: Request) -> str:
+    try:
+        raw = await request.body()
+        data = json.loads(raw.decode("utf-8")) if raw else {}
+        cid = str(data.get("id", ""))[:64]
+    except Exception:
+        cid = ""
+    return cid or "anonymous"
+
+
+@app.post("/api/presence/ping")
+async def presence_ping(request: Request):
+    presence.ping(await _client_id(request))
+    return {"ok": True}
+
+
+@app.post("/api/presence/bye")
+async def presence_bye(request: Request):
+    presence.bye(await _client_id(request))
+    return {"ok": True}
 
 
 # --------------------------------------------------------------------------- health
